@@ -83,16 +83,16 @@ func (c *Controller) processNextItem() bool {
 	defer c.queue.Done(key)
 
 	// Invoke the method containing the business logic
-	err := c.syncHostsFile(key.(string))
+	err := c.reconcile(key.(string))
 	// Handle the error if something went wrong during the execution of the business logic
 	c.handleErr(err, key)
 	return true
 }
 
-// syncHostsFile is the business logic of the controller. In this controller it simply prints
+// reconcile is the business logic of the controller. In this controller it simply prints
 // information about the pod to stdout. In case an error happened, it has to simply return the error.
 // The retry logic should not be part of the business logic.
-func (c *Controller) syncHostsFile(key string) error {
+func (c *Controller) reconcile(key string) error {
 	obj, exists, err := c.indexer.GetByKey(key)
 	if err != nil {
 		log.Error(err, "Fetching object from store failed", "pod", key)
@@ -108,7 +108,11 @@ func (c *Controller) syncHostsFile(key string) error {
 		log.Info("Sync/Add/Update for Pod", "name", obj.(*core.Pod).GetName())
 	}
 
-	aliases, err := GenerateAliases(c.lister, c.namespace, c.addrType)
+	return c.syncHostsFile()
+}
+
+func (c *Controller) syncHostsFile() error {
+	aliases, err := c.GenerateAliases()
 	if err != nil {
 		log.Error(err, "Failed to generate aliases")
 		return err
@@ -119,7 +123,6 @@ func (c *Controller) syncHostsFile(key string) error {
 		return err
 	}
 	log.Info("host alias synced", "hostsFilePath", hostsFilePath, "updated", updated)
-
 	return nil
 }
 
@@ -164,6 +167,8 @@ func (c *Controller) Run(threadiness int, stopCh chan struct{}) {
 		runtime.HandleError(fmt.Errorf("Timed out waiting for caches to sync"))
 		return
 	}
+
+	_ = c.syncHostsFile()
 
 	for i := 0; i < threadiness; i++ {
 		go wait.Until(c.runWorker, time.Second, stopCh)
@@ -319,15 +324,15 @@ func GetIP(pod *core.Pod, addrType string) (string, error) {
 	}
 }
 
-func GenerateAliases(lister corelisters.PodLister, ns, addrType string) (string, error) {
-	pods, err := lister.Pods(ns).List(labels.Everything())
+func (c *Controller) GenerateAliases() (string, error) {
+	pods, err := c.lister.Pods(c.namespace).List(labels.Everything())
 	if err != nil {
 		return "", err
 	}
 
 	peers := make([]string, 0, len(pods))
 	for _, pod := range pods {
-		ip, err := GetIP(pod, addrType)
+		ip, err := GetIP(pod, c.addrType)
 		if err != nil {
 			return "", err
 		}
