@@ -40,10 +40,18 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog/v2"
+	"k8s.io/klog/v2/klogr"
+)
+
+var (
+	log = klogr.New().WithName("peer-finder")
 )
 
 // Controller demonstrates how to implement a controller with client-go.
 type Controller struct {
+	addrType  string
+	namespace string
+
 	indexer  cache.Indexer
 	queue    workqueue.RateLimitingInterface
 	informer cache.Controller
@@ -51,12 +59,14 @@ type Controller struct {
 }
 
 // NewController creates a new Controller.
-func NewController(queue workqueue.RateLimitingInterface, indexer cache.Indexer, informer cache.Controller) *Controller {
+func NewController(queue workqueue.RateLimitingInterface, indexer cache.Indexer, informer cache.Controller, namespace, addrType string) *Controller {
 	return &Controller{
-		informer: informer,
-		indexer:  indexer,
-		queue:    queue,
-		lister:   corelisters.NewPodLister(indexer),
+		informer:  informer,
+		indexer:   indexer,
+		queue:     queue,
+		lister:    corelisters.NewPodLister(indexer),
+		namespace: namespace,
+		addrType:  addrType,
 	}
 }
 
@@ -72,42 +82,42 @@ func (c *Controller) processNextItem() bool {
 	defer c.queue.Done(key)
 
 	// Invoke the method containing the business logic
-	err := c.syncToStdout(key.(string))
+	err := c.syncHostsFile(key.(string))
 	// Handle the error if something went wrong during the execution of the business logic
 	c.handleErr(err, key)
 	return true
 }
 
-// syncToStdout is the business logic of the controller. In this controller it simply prints
+// syncHostsFile is the business logic of the controller. In this controller it simply prints
 // information about the pod to stdout. In case an error happened, it has to simply return the error.
 // The retry logic should not be part of the business logic.
-func (c *Controller) syncToStdout(key string) error {
+func (c *Controller) syncHostsFile(key string) error {
 	obj, exists, err := c.indexer.GetByKey(key)
 	if err != nil {
-		klog.Errorf("Fetching object with key %s from store failed with %v", key, err)
+		log.Error(err, "Fetching object from store failed", "pod", key)
 		return err
 	}
 
 	if !exists {
 		// Below we will warm up our cache with a Pod, so that we will see a delete for one pod
-		fmt.Printf("Pod %s does not exist anymore\n", key)
+		log.Info("Pod does not exist anymore", "pod", key)
 	} else {
 		// Note that you also have to check the uid if you have a local controlled resource, which
 		// is dependent on the actual instance, to detect that a Pod was recreated with the same name
-		fmt.Printf("Sync/Add/Update for Pod %s\n", obj.(*core.Pod).GetName())
+		log.Info("Sync/Add/Update for Pod", "name", obj.(*core.Pod).GetName())
 	}
 
-	aliases, err := GenerateAliases(c.lister, core.NamespaceDefault, "IPv6")
+	aliases, err := GenerateAliases(c.lister, c.namespace, c.addrType)
 	if err != nil {
-		klog.Errorf("Failed to generate aliases due to %v", err)
+		log.Error(err, "Failed to generate aliases")
 		return err
 	}
 	updated, err := UpdateHostsFile(path, aliases)
 	if err != nil {
-		klog.ErrorS(err, "failed to update host aliases", "path", path, "aliases", aliases)
+		log.Error(err, "failed to update host aliases", "path", path, "aliases", aliases)
 		return err
 	}
-	klog.InfoS("host alias synced", "path", path, "updated", updated)
+	log.Info("host alias synced", "path", path, "updated", updated)
 
 	return nil
 }
@@ -124,7 +134,7 @@ func (c *Controller) handleErr(err error, key interface{}) {
 
 	// This controller retries 5 times if something goes wrong. After that, it stops trying.
 	if c.queue.NumRequeues(key) < 5 {
-		klog.Infof("Error syncing pod %v: %v", key, err)
+		log.Error(err, "Error syncing", "pod", key)
 
 		// Re-enqueue the key rate limited. Based on the rate limiter on the
 		// queue and the re-enqueue history, the key will be processed later again.
@@ -135,7 +145,7 @@ func (c *Controller) handleErr(err error, key interface{}) {
 	c.queue.Forget(key)
 	// Report to an external entity that, even after several retries, we could not successfully process this key
 	runtime.HandleError(err)
-	klog.Infof("Dropping pod %q out of the queue: %v", key, err)
+	log.Error(err, "Dropping pod out of the queue", "pod", key)
 }
 
 // Run begins watching and syncing.
@@ -144,7 +154,7 @@ func (c *Controller) Run(threadiness int, stopCh chan struct{}) {
 
 	// Let the workers stop when we are done
 	defer c.queue.ShutDown()
-	klog.Info("Starting Pod controller")
+	log.Info("Starting Pod controller")
 
 	go c.informer.Run(stopCh)
 
@@ -159,7 +169,7 @@ func (c *Controller) Run(threadiness int, stopCh chan struct{}) {
 	}
 
 	<-stopCh
-	klog.Info("Stopping Pod controller")
+	log.Info("Stopping Pod controller")
 }
 
 func (c *Controller) runWorker() {
@@ -168,6 +178,9 @@ func (c *Controller) runWorker() {
 }
 
 func main() {
+	klog.InitFlags(nil)
+	defer klog.Flush()
+
 	var kubeconfig string
 	var master string
 
@@ -198,8 +211,15 @@ func main() {
 		"app": "nginx",
 	}).String()
 
+	RunHostAliasSyncer(clientset, core.NamespaceDefault, sel, "IPv6")
+
+	// Wait forever
+	select {}
+}
+
+func RunHostAliasSyncer(kc kubernetes.Interface, namespace, sel, addrType string) {
 	// create the pod watcher
-	podListWatcher := cache.NewFilteredListWatchFromClient(clientset.CoreV1().RESTClient(), "pods", core.NamespaceDefault, func(options *metav1.ListOptions) {
+	podListWatcher := cache.NewFilteredListWatchFromClient(kc.CoreV1().RESTClient(), "pods", namespace, func(options *metav1.ListOptions) {
 		options.LabelSelector = sel
 		// options.FieldSelector = fields.Everything().String()
 	})
@@ -236,15 +256,12 @@ func main() {
 		cache.NamespaceIndex: cache.MetaNamespaceIndexFunc,
 	})
 
-	controller := NewController(queue, indexer, informer)
+	controller := NewController(queue, indexer, informer, namespace, addrType)
 
 	// Now let's start the controller
 	stop := make(chan struct{})
 	defer close(stop)
 	go controller.Run(1, stop)
-
-	// Wait forever
-	select {}
 }
 
 type IPNotAssigned struct {
@@ -345,14 +362,14 @@ func UpdateHostsFile(path, aliases string) (bool, error) {
 	}
 
 	hash := sha1.Sum([]byte(aliases))
-	newhex := hex.EncodeToString(hash[:])
-	if curHex == newhex {
+	newHex := hex.EncodeToString(hash[:])
+	if curHex == newHex {
 		return false, nil
 	}
 
 	var out bytes.Buffer
 	out.WriteString(hostsfile)
-	out.WriteString(fmt.Sprintf("# peer-finder-managed-aliases:%s", newhex))
+	out.WriteString(fmt.Sprintf("# peer-finder-managed-aliases:%s", newHex))
 	out.WriteRune('\n')
 	out.WriteString(aliases)
 
