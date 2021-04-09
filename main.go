@@ -231,7 +231,9 @@ func main() {
 				queue.Add(key)
 			}
 		},
-	}, cache.Indexers{})
+	}, cache.Indexers{
+		cache.NamespaceIndex: cache.MetaNamespaceIndexFunc,
+	})
 
 	controller := NewController(queue, indexer, informer)
 
