@@ -34,6 +34,17 @@ import (
 	"k8s.io/client-go/util/workqueue"
 )
 
+const hostsfile = `# Kubernetes-managed hosts file.
+127.0.0.1	localhost
+::1	localhost ip6-localhost ip6-loopback
+fe00::0	ip6-localnet
+fe00::0	ip6-mcastprefix
+fe00::1	ip6-allnodes
+fe00::2	ip6-allrouters
+
+fd00:10:244::6	web-0.nginx.default.svc.cluster.local	web-0
+`
+
 // Controller demonstrates how to implement a controller with client-go.
 type Controller struct {
 	indexer  cache.Indexer
