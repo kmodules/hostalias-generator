@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -211,13 +212,16 @@ func main() {
 		"app": "nginx",
 	}).String()
 
-	RunHostAliasSyncer(clientset, core.NamespaceDefault, sel, "IPv6")
+	stop := make(chan struct{})
+	defer close(stop)
+
+	RunHostAliasSyncer(clientset, core.NamespaceDefault, sel, "IPv6", stop)
 
 	// Wait forever
 	select {}
 }
 
-func RunHostAliasSyncer(kc kubernetes.Interface, namespace, sel, addrType string) {
+func RunHostAliasSyncer(kc kubernetes.Interface, namespace, sel, addrType string, stop chan struct{}) {
 	// create the pod watcher
 	podListWatcher := cache.NewFilteredListWatchFromClient(kc.CoreV1().RESTClient(), "pods", namespace, func(options *metav1.ListOptions) {
 		options.LabelSelector = sel
@@ -259,8 +263,6 @@ func RunHostAliasSyncer(kc kubernetes.Interface, namespace, sel, addrType string
 	controller := NewController(queue, indexer, informer, namespace, addrType)
 
 	// Now let's start the controller
-	stop := make(chan struct{})
-	defer close(stop)
 	go controller.Run(1, stop)
 }
 
@@ -351,7 +353,7 @@ fe00::2	ip6-allrouters
 
 func UpdateHostsFile(path, aliases string) (bool, error) {
 	data, err := ioutil.ReadFile(path)
-	if err != nil {
+	if err != nil && !os.IsNotExist(err) {
 		return false, err
 	}
 	matches := re.FindStringSubmatch(string(data))
@@ -369,6 +371,7 @@ func UpdateHostsFile(path, aliases string) (bool, error) {
 
 	var out bytes.Buffer
 	out.WriteString(hostsfile)
+	out.WriteRune('\n')
 	out.WriteString(fmt.Sprintf("# peer-finder-managed-aliases:%s", newHex))
 	out.WriteRune('\n')
 	out.WriteString(aliases)
