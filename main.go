@@ -25,6 +25,7 @@ import (
 	"io/ioutil"
 	"net"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -313,6 +314,7 @@ func GenerateAliases(lister corelisters.PodLister, ns, addrType string) (string,
 		}
 		peers = append(peers, fmt.Sprintf("%s %s", ip, pod.Name))
 	}
+	sort.Strings(peers)
 	return strings.Join(peers, "\n"), nil
 }
 
