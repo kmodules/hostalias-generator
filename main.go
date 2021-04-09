@@ -17,15 +17,23 @@ limitations under the License.
 package main
 
 import (
+	"bytes"
+	"crypto/sha1"
+	"encoding/hex"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"k8s.io/apimachinery/pkg/labels"
+	corelisters "k8s.io/client-go/listers/core/v1"
+	"net"
+	"regexp"
+	"strings"
 	"time"
 
 	"k8s.io/klog/v2"
 
-	v1 "k8s.io/api/core/v1"
-	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	core "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
@@ -34,22 +42,12 @@ import (
 	"k8s.io/client-go/util/workqueue"
 )
 
-const hostsfile = `# Kubernetes-managed hosts file.
-127.0.0.1	localhost
-::1	localhost ip6-localhost ip6-loopback
-fe00::0	ip6-localnet
-fe00::0	ip6-mcastprefix
-fe00::1	ip6-allnodes
-fe00::2	ip6-allrouters
-
-fd00:10:244::6	web-0.nginx.default.svc.cluster.local	web-0
-`
-
 // Controller demonstrates how to implement a controller with client-go.
 type Controller struct {
 	indexer  cache.Indexer
 	queue    workqueue.RateLimitingInterface
 	informer cache.Controller
+	lister   corelisters.PodLister
 }
 
 // NewController creates a new Controller.
@@ -58,6 +56,7 @@ func NewController(queue workqueue.RateLimitingInterface, indexer cache.Indexer,
 		informer: informer,
 		indexer:  indexer,
 		queue:    queue,
+		lister:   corelisters.NewPodLister(indexer),
 	}
 }
 
@@ -95,8 +94,21 @@ func (c *Controller) syncToStdout(key string) error {
 	} else {
 		// Note that you also have to check the uid if you have a local controlled resource, which
 		// is dependent on the actual instance, to detect that a Pod was recreated with the same name
-		fmt.Printf("Sync/Add/Update for Pod %s\n", obj.(*v1.Pod).GetName())
+		fmt.Printf("Sync/Add/Update for Pod %s\n", obj.(*core.Pod).GetName())
 	}
+
+	aliases, err := GenerateAliases(c.lister, core.NamespaceDefault, "IPv6")
+	if err != nil {
+		klog.Errorf("Failed to generate aliases due to %v", err)
+		return err
+	}
+	updated, err := UpdateHostsFile(path, aliases)
+	if err != nil {
+		klog.ErrorS(err, "failed to update host aliases", "path", path, "aliases", aliases)
+		return err
+	}
+	klog.InfoS("host alias synced", "path", path, "updated", updated)
+
 	return nil
 }
 
@@ -187,7 +199,7 @@ func main() {
 	}).String()
 
 	// create the pod watcher
-	podListWatcher := cache.NewFilteredListWatchFromClient(clientset.CoreV1().RESTClient(), "pods", v1.NamespaceDefault, func(options *meta_v1.ListOptions) {
+	podListWatcher := cache.NewFilteredListWatchFromClient(clientset.CoreV1().RESTClient(), "pods", core.NamespaceDefault, func(options *metav1.ListOptions) {
 		options.LabelSelector = sel
 		// options.FieldSelector = fields.Everything().String()
 	})
@@ -199,7 +211,7 @@ func main() {
 	// whenever the cache is updated, the pod key is added to the workqueue.
 	// Note that when we finally process the item from the workqueue, we might see a newer version
 	// of the Pod than the version which was responsible for triggering the update.
-	indexer, informer := cache.NewIndexerInformer(podListWatcher, &v1.Pod{}, 0, cache.ResourceEventHandlerFuncs{
+	indexer, informer := cache.NewIndexerInformer(podListWatcher, &core.Pod{}, 0, cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			key, err := cache.MetaNamespaceKeyFunc(obj)
 			if err == nil {
@@ -231,4 +243,119 @@ func main() {
 
 	// Wait forever
 	select {}
+}
+
+type IPNotAssigned struct {
+	name string
+}
+
+var _ error = IPNotAssigned{}
+
+func (e IPNotAssigned) Error() string {
+	return fmt.Sprintf("ip not assigned to pod %s", e.name)
+}
+
+type IPNotFound struct {
+	addrType string
+	name     string
+}
+
+var _ error = IPNotFound{}
+
+func (e IPNotFound) Error() string {
+	return fmt.Sprintf("%s address not found for pod %s", e.addrType, e.name)
+}
+
+func GetIP(pod *core.Pod, addrType string) (string, error) {
+	addrs := pod.Status.PodIPs
+	if len(addrs) == 0 {
+		addrs = []core.PodIP{{IP: pod.Status.PodIP}}
+	}
+	if len(addrs) == 0 {
+		return "", IPNotAssigned{name: pod.Name}
+	}
+
+	switch addrType {
+	case "IP":
+		return addrs[0].IP, nil
+	case "IPv4":
+		for _, addr := range addrs {
+			if ip := net.ParseIP(addr.IP); len(ip) == net.IPv4len {
+				return addr.IP, nil
+			}
+		}
+	case "IPv6":
+		for _, addr := range addrs {
+			if ip := net.ParseIP(addr.IP); len(ip) == net.IPv6len {
+				return addr.IP, nil
+			}
+		}
+	}
+
+	return "", IPNotFound{
+		addrType: addrType,
+		name:     pod.Name,
+	}
+}
+
+func GenerateAliases(lister corelisters.PodLister, ns, addrType string) (string, error) {
+	pods, err := lister.Pods(ns).List(labels.Everything())
+	if err != nil {
+		return "", err
+	}
+
+	peers := make([]string, 0, len(pods))
+	for _, pod := range pods {
+		ip, err := GetIP(pod, addrType)
+		if err != nil {
+			return "", err
+		}
+		peers = append(peers, fmt.Sprintf("%s %s", ip, pod.Name))
+	}
+	return strings.Join(peers, "\n"), nil
+}
+
+// File for testing
+const path = "/tmp/hosts"
+
+var re = regexp.MustCompile(`# peer-finder-managed-aliases:(.*)`)
+
+const hostsfile = `# Kubernetes-managed hosts file.
+127.0.0.1	localhost
+::1	localhost ip6-localhost ip6-loopback
+fe00::0	ip6-localnet
+fe00::0	ip6-mcastprefix
+fe00::1	ip6-allnodes
+fe00::2	ip6-allrouters
+`
+
+func UpdateHostsFile(path, aliases string) (bool, error) {
+	data, err := ioutil.ReadFile(path)
+	if err != nil {
+		return false, err
+	}
+	matches := re.FindStringSubmatch(string(data))
+
+	var curHex string
+	if len(matches) == 2 {
+		curHex = matches[1]
+	}
+
+	hash := sha1.Sum([]byte(aliases))
+	newhex := hex.EncodeToString(hash[:])
+	if curHex == newhex {
+		return false, nil
+	}
+
+	var out bytes.Buffer
+	out.WriteString(hostsfile)
+	out.WriteString(fmt.Sprintf("# peer-finder-managed-aliases:%s", newhex))
+	out.WriteRune('\n')
+	out.WriteString(aliases)
+
+	err = ioutil.WriteFile(path, out.Bytes(), 0644)
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
