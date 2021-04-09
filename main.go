@@ -113,12 +113,12 @@ func (c *Controller) syncHostsFile(key string) error {
 		log.Error(err, "Failed to generate aliases")
 		return err
 	}
-	updated, err := UpdateHostsFile(path, aliases)
+	updated, err := UpdateHostsFile(hostsFilePath, aliases)
 	if err != nil {
-		log.Error(err, "failed to update host aliases", "path", path, "aliases", aliases)
+		log.Error(err, "failed to update host aliases", "hostsFilePath", hostsFilePath, "aliases", aliases)
 		return err
 	}
-	log.Info("host alias synced", "path", path, "updated", updated)
+	log.Info("host alias synced", "hostsFilePath", hostsFilePath, "updated", updated)
 
 	return nil
 }
@@ -185,7 +185,7 @@ func main() {
 	var kubeconfig string
 	var master string
 
-	flag.StringVar(&kubeconfig, "kubeconfig", "", "absolute path to the kubeconfig file")
+	flag.StringVar(&kubeconfig, "kubeconfig", "", "absolute hostsFilePath to the kubeconfig file")
 	flag.StringVar(&master, "master", "", "master url")
 	flag.Parse()
 
@@ -338,7 +338,7 @@ func GenerateAliases(lister corelisters.PodLister, ns, addrType string) (string,
 }
 
 // File for testing
-const path = "/tmp/hosts"
+const hostsFilePath = "/tmp/hosts"
 
 var re = regexp.MustCompile(`# peer-finder-managed-aliases:(.*)`)
 
