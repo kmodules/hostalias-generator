@@ -23,23 +23,22 @@ import (
 	"flag"
 	"fmt"
 	"io/ioutil"
-	"k8s.io/apimachinery/pkg/labels"
-	corelisters "k8s.io/client-go/listers/core/v1"
 	"net"
 	"regexp"
 	"strings"
 	"time"
 
-	"k8s.io/klog/v2"
-
 	core "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
+	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/workqueue"
+	"k8s.io/klog/v2"
 )
 
 // Controller demonstrates how to implement a controller with client-go.
