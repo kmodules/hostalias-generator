@@ -19,13 +19,13 @@ package main
 import (
 	"flag"
 	"fmt"
+	"k8s.io/apimachinery/pkg/labels"
 	"time"
 
 	"k8s.io/klog/v2"
 
 	v1 "k8s.io/api/core/v1"
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
@@ -164,8 +164,22 @@ func main() {
 		klog.Fatal(err)
 	}
 
+	/*
+	  labels:
+	    app: nginx
+	    controller-revision-hash: web-6596ffb49b
+	    statefulset.kubernetes.io/pod-name: web-0
+	*/
+
+	sel := labels.SelectorFromSet(labels.Set{
+		"app": "nginx",
+	}).String()
+
 	// create the pod watcher
-	podListWatcher := cache.NewListWatchFromClient(clientset.CoreV1().RESTClient(), "pods", v1.NamespaceDefault, fields.Everything())
+	podListWatcher := cache.NewFilteredListWatchFromClient(clientset.CoreV1().RESTClient(), "pods", v1.NamespaceDefault, func(options *meta_v1.ListOptions) {
+		options.LabelSelector = sel
+		// options.FieldSelector = fields.Everything().String()
+	})
 
 	// create the workqueue
 	queue := workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
@@ -198,17 +212,6 @@ func main() {
 	}, cache.Indexers{})
 
 	controller := NewController(queue, indexer, informer)
-
-	// We can now warm up the cache for initial synchronization.
-	// Let's suppose that we knew about a pod "mypod" on our last run, therefore add it to the cache.
-	// If this pod is not there anymore, the controller will be notified about the removal after the
-	// cache has synchronized.
-	indexer.Add(&v1.Pod{
-		ObjectMeta: meta_v1.ObjectMeta{
-			Name:      "mypod",
-			Namespace: v1.NamespaceDefault,
-		},
-	})
 
 	// Now let's start the controller
 	stop := make(chan struct{})
