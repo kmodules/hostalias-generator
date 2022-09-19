@@ -22,7 +22,6 @@ import (
 	"encoding/hex"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"net"
 	"os"
 	"regexp"
@@ -44,9 +43,7 @@ import (
 	"k8s.io/klog/v2/klogr"
 )
 
-var (
-	log = klogr.New().WithName("peer-finder")
-)
+var log = klogr.New().WithName("peer-finder")
 
 // Controller demonstrates how to implement a controller with client-go.
 type Controller struct {
@@ -357,7 +354,7 @@ fe00::2	ip6-allrouters
 `
 
 func UpdateHostsFile(path, aliases string) (bool, error) {
-	data, err := ioutil.ReadFile(path)
+	data, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
 		return false, err
 	}
@@ -381,7 +378,7 @@ func UpdateHostsFile(path, aliases string) (bool, error) {
 	out.WriteRune('\n')
 	out.WriteString(aliases)
 
-	err = ioutil.WriteFile(path, out.Bytes(), 0644)
+	err = os.WriteFile(path, out.Bytes(), 0o644)
 	if err != nil {
 		return false, err
 	}
